@@ -8,10 +8,7 @@ import org.springframework.stereotype.Service;
 import javax.persistence.EntityManager;
 import javax.persistence.EntityNotFoundException;
 import javax.persistence.TypedQuery;
-import javax.persistence.criteria.CriteriaBuilder;
-import javax.persistence.criteria.CriteriaQuery;
-import javax.persistence.criteria.Predicate;
-import javax.persistence.criteria.Root;
+import javax.persistence.criteria.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -57,21 +54,19 @@ public abstract class BaseService<Entity, ID, Repository extends JpaRepository<E
     public PagedResponse<Entity> findAllByParams(Map<String, Object> params) {
         // Pagination keys
         int start = (int) params.getOrDefault("startIndex", 0);
-        int pageSize = (int) params.getOrDefault("pageSize", 0);
+        int pageSize = (int) params.getOrDefault("pageSize", 10);
 
-        // Remove pagination keys from the rest
+        // Remove pagination keys
         Map<String, Object> filteredParams = params.entrySet().stream()
                 .filter(entry -> !entry.getKey().equals("startIndex") && !entry.getKey().equals("pageSize"))
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
 
         CriteriaBuilder cb = entityManager.getCriteriaBuilder();
+
+        // Main query
         CriteriaQuery<Entity> cq = cb.createQuery(getEntityClass());
         Root<Entity> root = cq.from(getEntityClass());
-
-        List<Predicate> predicates = new ArrayList<>();
-        for (Map.Entry<String, Object> entry : filteredParams.entrySet()) {
-            predicates.add(cb.equal(root.get(entry.getKey()), entry.getValue()));
-        }
+        List<Predicate> predicates = buildPredicates(root, cb, filteredParams);
         cq.where(predicates.toArray(new Predicate[0]));
 
         // Execute paginated query
@@ -82,13 +77,44 @@ public abstract class BaseService<Entity, ID, Repository extends JpaRepository<E
         }
         List<Entity> result = query.getResultList();
 
-        // Get total count (without pagination)
+        // Count query
         CriteriaQuery<Long> countQuery = cb.createQuery(Long.class);
         Root<Entity> countRoot = countQuery.from(getEntityClass());
-        countQuery.select(cb.count(countRoot)).where(predicates.toArray(new Predicate[0]));
+        List<Predicate> countPredicates = buildPredicates(countRoot, cb, filteredParams);
+        countQuery.select(cb.count(countRoot))
+                .where(countPredicates.toArray(new Predicate[0]));
         long totalCount = entityManager.createQuery(countQuery).getSingleResult();
 
         return new PagedResponse<>(totalCount, result);
+    }
+
+    private List<Predicate> buildPredicates(Root<Entity> root, CriteriaBuilder cb, Map<String, Object> filteredParams) {
+        List<Predicate> predicates = new ArrayList<>();
+
+        for (Map.Entry<String, Object> entry : filteredParams.entrySet()) {
+            String key = entry.getKey();
+            Object value = entry.getValue();
+
+            if (key.contains(".")) {
+                // Handle nested properties
+                String[] pathSegments = key.split("\\.");
+                From<?, ?> from = root;
+
+                // Traverse the relationship path
+                for (int i = 0; i < pathSegments.length - 1; i++) {
+                    from = from.join(pathSegments[i], JoinType.INNER);
+                }
+
+                // Add predicate for the final property
+                Path<Object> propertyPath = from.get(pathSegments[pathSegments.length - 1]);
+                predicates.add(cb.equal(propertyPath, value));
+            } else {
+                // Handle simple property
+                predicates.add(cb.equal(root.get(key), value));
+            }
+        }
+
+        return predicates;
     }
 
     protected abstract Class<Entity> getEntityClass();
